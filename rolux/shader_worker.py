@@ -345,6 +345,9 @@ class ShaderWorker(threading.Thread):
             depth_f = np.ascontiguousarray(depth_f, dtype=np.float32)
 
         depth_f = self._temporal_filter_depth(depth_f)
+        if depth_f.shape[0] != th or depth_f.shape[1] != tw:
+            depth_f = cv2.resize(depth_f, (tw, th), interpolation=cv2.INTER_LINEAR)
+            depth_f = np.ascontiguousarray(depth_f, dtype=np.float32)
 
         return self._run_chain(scene, depth, depth_f)
 
@@ -663,6 +666,21 @@ class ShaderWorker(threading.Thread):
         self._pbo_idx = 0
         self._pbo_ready = False
 
+        # View-space normals at shader resolution (uDepthF sampled with linear upscale).
+        self._tex_normal = self._make_tex()
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._tex_normal)
+        GL.glTexImage2D(
+            GL.GL_TEXTURE_2D, 0, GL.GL_RGB8, w, h, 0, GL.GL_RGB, GL.GL_UNSIGNED_BYTE, None
+        )
+        self._fbo_n = int(GL.glGenFramebuffers(1))
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self._fbo_n)
+        GL.glFramebufferTexture2D(
+            GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, self._tex_normal, 0
+        )
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+        self._readback_n = np.empty((h, w, 3), dtype=np.uint8)
+        print(f"[Rolux] normal target @ {w}x{h} (shader res)")
+
     def _upload(self, tex: int, rgb: np.ndarray) -> None:
         from OpenGL import GL
 
@@ -698,37 +716,21 @@ class ShaderWorker(threading.Thread):
     def _ensure_depth_f(self, w: int, h: int) -> None:
         from OpenGL import GL
 
-        if self._tex_depth_f and self._df_w == w and self._df_h == h and self._fbo_n:
+        if self._tex_depth_f and self._df_w == w and self._df_h == h:
             return
         if self._tex_depth_f:
             GL.glDeleteTextures(1, [int(self._tex_depth_f)])
-        if self._tex_normal:
-            GL.glDeleteTextures(1, [int(self._tex_normal)])
         if self._tex_prev_df:
             GL.glDeleteTextures(1, [int(self._tex_prev_df)])
-        if self._fbo_n:
-            GL.glDeleteFramebuffers(1, [int(self._fbo_n)])
 
         self._tex_depth_f = self._make_tex()
         GL.glBindTexture(GL.GL_TEXTURE_2D, self._tex_depth_f)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
         GL.glTexImage2D(
             GL.GL_TEXTURE_2D, 0, GL.GL_R32F, w, h, 0, GL.GL_RED, GL.GL_FLOAT, None
         )
 
-        # Normals rendered at native depth size (not upscaled shader res).
-        self._tex_normal = self._make_tex()
-        GL.glBindTexture(GL.GL_TEXTURE_2D, self._tex_normal)
-        GL.glTexImage2D(
-            GL.GL_TEXTURE_2D, 0, GL.GL_RGB8, w, h, 0, GL.GL_RGB, GL.GL_UNSIGNED_BYTE, None
-        )
-        self._fbo_n = int(GL.glGenFramebuffers(1))
-        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self._fbo_n)
-        GL.glFramebufferTexture2D(
-            GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, self._tex_normal, 0
-        )
-        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
         # Previous-frame depth (for temporal reprojection/rejection).
         self._tex_prev_df = self._make_tex()
         GL.glBindTexture(GL.GL_TEXTURE_2D, self._tex_prev_df)
@@ -740,8 +742,7 @@ class ShaderWorker(threading.Thread):
         self._prev_df = None
 
         self._df_w, self._df_h = w, h
-        self._readback_n = np.empty((h, w, 3), dtype=np.uint8)
-        print(f"[Rolux] normals @ {w}x{h} (native depth)")
+        print(f"[Rolux] depth_f @ {w}x{h} (shader res)")
 
     def _upload_depth_f(self, depth_f: np.ndarray) -> None:
         from OpenGL import GL
@@ -778,7 +779,7 @@ class ShaderWorker(threading.Thread):
         import cv2
         from OpenGL import GL
 
-        w, h = self._df_w, self._df_h
+        w, h = self._w, self._h
         buf = getattr(self, "_readback_n", None)
         if buf is None or buf.shape[0] != h or buf.shape[1] != w:
             buf = np.empty((h, w, 3), dtype=np.uint8)
@@ -840,7 +841,7 @@ class ShaderWorker(threading.Thread):
         self._pt_upload = (time.perf_counter() - _tu) * 1000.0
 
         _tg = time.perf_counter()
-        self._generate_normals(self._df_w, self._df_h)
+        self._generate_normals(w, h)
         if self._save_normals.is_set():
             self._save_normals.clear()
             try:
