@@ -313,14 +313,14 @@ class DepthOverlay(threading.Thread):
 
     def set_exclude_from_capture(self, enable: bool) -> None:
         """
-        When True (default), Win+PrintScreen / Snipping Tool cannot see the overlay
-        (needed so DXGI captures Roblox underneath). Set False to allow screenshots.
+        When True (default), Win+PrintScreen / Snipping Tool / OBS cannot see the
+        overlay (DXGI reads Roblox underneath). Set False to allow recording.
         """
         if self._hwnd:
             exclude_from_capture(self._hwnd, enable=bool(enable))
             print(
                 "[Rolux] overlay "
-                + ("hidden from screenshots/DXGI" if enable else "VISIBLE to screenshots")
+                + ("hidden from capture (DXGI sees Roblox)" if enable else "visible to recorders")
             )
 
     def _free_dib(self) -> None:

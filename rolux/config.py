@@ -34,6 +34,10 @@ class RoluxConfig:
     # Depth-only cover: 1.0 = fully opaque (no Roblox pixels show through).
     overlay_opacity: float = 1.0
     depth_gain: float = 1.0
+    # When False (default), the overlay HWND uses WDA_EXCLUDEFROMCAPTURE so DXGI
+    # reads Roblox underneath. When True, Snipping Tool / OBS / ShadowPlay can
+    # capture the post-processed overlay (effects visible in recordings).
+    allow_screen_capture: bool = False
 
     # --- Shaders ---
     # Folder of *.glsl fragment shaders (hot-reloaded, run in sorted name order).

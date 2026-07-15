@@ -318,17 +318,26 @@ class RoluxApp:
         self._labeled_scale(s, "Overlay opacity", self.var_opacity, 0.2, 1.0, is_int=False)
 
         tk.Checkbutton(
+            s, text="Allow screen capture & recording",
+            variable=self.var_allow_shot,
+            command=self._on_allow_shot, bg=PANEL, fg=FG, selectcolor=CARD,
+            activebackground=PANEL, activeforeground=FG, font=FONT,
+            highlightthickness=0, anchor="w",
+        ).pack(fill="x", pady=(8, 2))
+        tk.Label(
+            s,
+            text=(
+                "Include RoLux effects in Snipping Tool, OBS, ShadowPlay, and "
+                "other recorders. Off by default so DXGI can read Roblox under the overlay."
+            ),
+            bg=PANEL, fg=MUTED, font=FONT_SM, justify="left", wraplength=420,
+        ).pack(fill="x", pady=(0, 4))
+
+        tk.Checkbutton(
             s, text="Only show while Roblox is focused", variable=self.var_focus,
             bg=PANEL, fg=FG, selectcolor=CARD, activebackground=PANEL,
             activeforeground=FG, font=FONT, highlightthickness=0, anchor="w",
         ).pack(fill="x", pady=(8, 4))
-        tk.Checkbutton(
-            s, text="Allow OS screenshots of overlay", variable=self.var_allow_shot,
-            command=self._on_allow_shot, bg=PANEL, fg=FG, selectcolor=CARD,
-            activebackground=PANEL, activeforeground=FG, font=FONT,
-            highlightthickness=0, anchor="w",
-        ).pack(fill="x", pady=(0, 4))
-
         tk.Checkbutton(
             s, text="Temporal denoising (accumulation + depth filters)",
             variable=self.var_temporal, command=self._on_temporal_change,
@@ -358,7 +367,11 @@ class RoluxApp:
         self.lbl_infer = ttk.Label(s, text="Infer: — · e2e — ms", style="Stat.TLabel")
         self.lbl_cap = ttk.Label(s, text="Capture: — FPS", style="Stat.TLabel")
         self.lbl_shaders = ttk.Label(s, text="Active: —", style="Stat.TLabel")
-        for w in (self.lbl_roblox, self.lbl_focus, self.lbl_cap, self.lbl_fps, self.lbl_infer, self.lbl_shaders):
+        self.lbl_recording = ttk.Label(s, text="Recording: —", style="Stat.TLabel")
+        for w in (
+            self.lbl_roblox, self.lbl_focus, self.lbl_cap, self.lbl_fps,
+            self.lbl_infer, self.lbl_shaders, self.lbl_recording,
+        ):
             w.pack(anchor="w", pady=2)
 
         shots = self._card(parent)
@@ -660,9 +673,30 @@ class RoluxApp:
             self.overlay.set_opacity(float(self.var_opacity.get()))
 
     def _on_allow_shot(self) -> None:
-        exclude = not bool(self.var_allow_shot.get())
+        allow = bool(self.var_allow_shot.get())
+        self.status["allow_screen_capture"] = allow
         if self.overlay is not None:
-            self.overlay.set_exclude_from_capture(exclude)
+            self.overlay.set_exclude_from_capture(not allow)
+        self._update_recording_label()
+        if allow:
+            msg = "Recording ON — effects visible to capture apps"
+            color = OK
+        else:
+            msg = "Recording OFF — overlay hidden from capture (best for DXGI)"
+            color = MUTED
+        if self.running:
+            self.lbl_state.configure(text=msg, fg=color)
+        else:
+            self.lbl_state.configure(text=f"{msg} (applies on Start)", fg=color)
+
+    def _update_recording_label(self) -> None:
+        lbl = getattr(self, "lbl_recording", None)
+        if lbl is None:
+            return
+        if bool(self.var_allow_shot.get()):
+            lbl.configure(text="Recording: effects visible to capture apps")
+        else:
+            lbl.configure(text="Recording: overlay hidden from capture (default)")
 
     def _on_temporal_change(self) -> None:
         """Toggle all temporal features live (and remember for next start)."""
@@ -713,6 +747,7 @@ class RoluxApp:
         sh = self.status.get("shaders")
         if isinstance(sh, list):
             self.lbl_shaders.configure(text=("Active: " + ", ".join(sh)) if sh else "Active: (none)")
+        self._update_recording_label()
         last = self.status.pop("last_capture", None) if self.running else None
         if last:
             self.lbl_state.configure(text=f"Saved {Path(str(last)).name}", fg=OK)
@@ -743,6 +778,7 @@ class RoluxApp:
             overlay_opacity=float(self.var_opacity.get()),
             shaders_dir=self.shaders_dir,
             shader_max_dim=max(256, int(self.var_render.get())),
+            allow_screen_capture=bool(self.var_allow_shot.get()),
             temporal_accumulation=bool(self.var_temporal.get()),
             depth_temporal_filter=bool(self.var_temporal.get()),
             stabilize_depth_range=bool(self.var_temporal.get()),
@@ -804,7 +840,10 @@ class RoluxApp:
         )
         self.overlay.start()
         self.overlay.wait_ready(2.0)
-        self.overlay.set_exclude_from_capture(not bool(self.var_allow_shot.get()))
+        allow_cap = bool(cfg.allow_screen_capture)
+        self.status["allow_screen_capture"] = allow_cap
+        self.overlay.set_exclude_from_capture(not allow_cap)
+        self._update_recording_label()
 
         self.shaders.start()
         self.infer.start()
