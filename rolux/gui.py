@@ -328,7 +328,8 @@ class RoluxApp:
             s,
             text=(
                 "Include RoLux effects in Snipping Tool, OBS, ShadowPlay, and "
-                "other recorders. Off by default so DXGI can read Roblox under the overlay."
+                "other recorders. RoLux switches its own capture to PrintWindow "
+                "so it never reads the overlay back (no feedback loop)."
             ),
             bg=PANEL, fg=MUTED, font=FONT_SM, justify="left", wraplength=420,
         ).pack(fill="x", pady=(0, 4))
@@ -675,14 +676,16 @@ class RoluxApp:
     def _on_allow_shot(self) -> None:
         allow = bool(self.var_allow_shot.get())
         self.status["allow_screen_capture"] = allow
+        if self.capture is not None:
+            self.capture.allow_screen_capture = allow
         if self.overlay is not None:
             self.overlay.set_exclude_from_capture(not allow)
         self._update_recording_label()
         if allow:
-            msg = "Recording ON — effects visible to capture apps"
+            msg = "Recording ON — visible to capture apps; RoLux uses PrintWindow"
             color = OK
         else:
-            msg = "Recording OFF — overlay hidden from capture (best for DXGI)"
+            msg = "Recording OFF — overlay hidden; RoLux uses DXGI"
             color = MUTED
         if self.running:
             self.lbl_state.configure(text=msg, fg=color)
@@ -694,9 +697,13 @@ class RoluxApp:
         if lbl is None:
             return
         if bool(self.var_allow_shot.get()):
-            lbl.configure(text="Recording: effects visible to capture apps")
+            lbl.configure(
+                text="Recording: effects visible externally · RoLux capture: PrintWindow"
+            )
         else:
-            lbl.configure(text="Recording: overlay hidden from capture (default)")
+            lbl.configure(
+                text="Recording: overlay hidden from capture · RoLux capture: DXGI (default)"
+            )
 
     def _on_temporal_change(self) -> None:
         """Toggle all temporal features live (and remember for next start)."""
@@ -842,6 +849,7 @@ class RoluxApp:
         self.overlay.wait_ready(2.0)
         allow_cap = bool(cfg.allow_screen_capture)
         self.status["allow_screen_capture"] = allow_cap
+        self.capture.allow_screen_capture = allow_cap
         self.overlay.set_exclude_from_capture(not allow_cap)
         self._update_recording_label()
 

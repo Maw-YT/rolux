@@ -8,7 +8,9 @@ Crash avoidance (hard-learned):
   - CoInitialize COM on this thread before touching DXGI.
 
 Requires the overlay HWND to call SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)
-so DXGI sees the real Roblox framebuffer under our depth cover.
+when recording is off so DXGI sees Roblox under the overlay. When recording is
+on (overlay visible to OBS etc.), internal capture switches to PrintWindow on
+the Roblox HWND so RoLux never reads its own overlay back.
 
 Falls back to PrintWindow if dxcam is unavailable.
 """
@@ -73,6 +75,10 @@ class CaptureWorker(threading.Thread):
         self._camera = None
         self._mon_origin = (0, 0)
         self._fallback = HwndCapturer()
+        # When True: overlay is visible to recorders; we capture via PrintWindow
+        # so RoLux never feeds back its own overlay. Live-toggled from the GUI.
+        self.allow_screen_capture = bool(getattr(config, "allow_screen_capture", False))
+        self._dxcam_ok = False
 
     def set_network_size(self, height: int, width: int) -> None:
         """Match capture downscale to the loaded TensorRT engine."""
@@ -197,16 +203,51 @@ class CaptureWorker(threading.Thread):
             return None
         return full[top:bottom, left:right]
 
-    def _run_dxcam(self) -> None:
+    def _run_dxcam_frame(self, hwnd: int, rect: WindowRect, focused: bool) -> bool:
+        """Grab one frame via DXGI crop. Returns True if a frame was published."""
         assert self._camera is not None
+        ts = time.perf_counter()
+        try:
+            full = self._camera.grab()
+        except Exception:
+            return False
+        if full is None:
+            return False
+        roi = self._crop(full, rect)
+        if roi is None:
+            return False
+        self._publish(roi, rect, hwnd, focused, ts)
+        self.status["capture_backend"] = "dxcam"
+        return True
+
+    def _run_printwindow_frame(self, hwnd: int, focused: bool) -> bool:
+        """Grab one frame via PrintWindow. Returns True if a frame was published."""
+        captured = self._fallback.grab(hwnd)
+        if captured is None:
+            return False
+        bgr, rect = captured
+        self._publish(bgr, rect, hwnd, focused, time.perf_counter())
+        self.status["capture_backend"] = (
+            "printwindow (recording)" if self.allow_screen_capture else "printwindow"
+        )
+        return True
+
+    def run(self) -> None:
         try:
             import ctypes
 
             ctypes.windll.kernel32.SetThreadPriority(
-                ctypes.windll.kernel32.GetCurrentThread(), 15  # TIME_CRITICAL
+                ctypes.windll.kernel32.GetCurrentThread(), 2
             )
         except Exception:
             pass
+
+        self._dxcam_ok = self._ensure_dxcam()
+        if self.allow_screen_capture:
+            print(
+                "[Rolux] recording mode: overlay visible to capture apps; "
+                "internal capture via PrintWindow (no overlay feedback)"
+            )
 
         while not self.stop_event.is_set():
             hwnd = self._resolve_hwnd()
@@ -225,66 +266,19 @@ class CaptureWorker(threading.Thread):
             else:
                 self._unfocus_streak = 0
 
+            use_pw = self.allow_screen_capture or not self._dxcam_ok or self._camera is None
+            if use_pw:
+                if not self._run_printwindow_frame(hwnd, focused):
+                    time.sleep(0.002)
+                continue
+
             rect = get_client_screen_rect(hwnd)
             if rect is None:
                 continue
-
-            ts = time.perf_counter()
-            try:
-                # Full-output only — region=/start() hard-crash the process.
-                full = self._camera.grab()
-            except Exception:
-                continue
-            if full is None:
-                # No new desktop frame yet; yield briefly.
+            if not self._run_dxcam_frame(hwnd, rect, focused):
                 time.sleep(0.0)
-                continue
-            roi = self._crop(full, rect)
-            if roi is None:
-                continue
-            self._publish(roi, rect, hwnd, focused, ts)
 
-    def _run_printwindow(self) -> None:
-        self.status["capture_backend"] = "printwindow"
-        print("[Rolux] capture backend: PrintWindow (fallback)")
-        while not self.stop_event.is_set():
-            hwnd = self._resolve_hwnd()
-            if hwnd is None:
-                self.status.update(roblox_found=False, focused=False)
-                time.sleep(0.05)
-                continue
-            focused = is_window_foreground(hwnd)
-            self.status.update(roblox_found=True, focused=focused, hwnd=hwnd)
-            if self.cfg.require_focus and not focused:
-                self._unfocus_streak += 1
-                if self._unfocus_streak >= 10:
-                    time.sleep(0.01)
-                    continue
-            else:
-                self._unfocus_streak = 0
-            captured = self._fallback.grab(hwnd)
-            if captured is None:
-                continue
-            bgr, rect = captured
-            self._publish(bgr, rect, hwnd, focused, time.perf_counter())
-
-    def run(self) -> None:
-        try:
-            import ctypes
-
-            ctypes.windll.kernel32.SetThreadPriority(
-                ctypes.windll.kernel32.GetCurrentThread(), 2
-            )
-        except Exception:
-            pass
-
-        if self._ensure_dxcam():
-            try:
-                self._run_dxcam()
-            finally:
-                self._camera = None
-        else:
-            self._run_printwindow()
+        self._camera = None
         self._fallback.close()
 
     @property
