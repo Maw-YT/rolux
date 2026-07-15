@@ -1,0 +1,38 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# ---- RoLux runtime artifacts ----
+# Live shader edits happen in a throwaway copy; never commit it.
+shaders/temp/
+# Screenshot output.
+captures/
+
+# ---- Models (large + machine-specific) ----
+# TensorRT .engine files are GPU/driver specific and must be rebuilt locally.
+# ONNX / calibration blobs are large binaries. Keep the folder, drop the weights.
+models/*.onnx
+models/*.engine
+models/*.data
+models/*.npz
+models/*.trt
+models/*.plan
+
+# ---- Third-party reference repos (cloned separately, hundreds of MB) ----
+third_party/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
