@@ -39,7 +39,7 @@ class RoluxConfig:
     # Folder of *.glsl fragment shaders (hot-reloaded, run in sorted name order).
     shaders_dir: Path = Path("shaders")
     # Run the GLSL chain at this max edge (upscaled from network res). Higher = sharper, slower.
-    shader_max_dim: int = 1280
+    shader_max_dim: int = 960
 
     # --- Temporal accumulation (history buffer) ---
     # Denoises the composited output frame-to-frame. SSR/SSRTGI jitter their

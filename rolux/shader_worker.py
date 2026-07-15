@@ -158,6 +158,7 @@ class ShaderWorker(threading.Thread):
         self.frame_ready = frame_ready
         self.shaders_dir = (shaders_dir or Path("shaders")).resolve()
         self.status = status if status is not None else {}
+        self.shader_max_dim = max(256, int(getattr(config, "shader_max_dim", 960)))
 
         self._last_ts: Optional[float] = None
         self._t0 = time.perf_counter()
@@ -182,6 +183,13 @@ class ShaderWorker(threading.Thread):
         self._df_w = 0
         self._df_h = 0
         self._readback = None
+        self._readback_flip: Optional[np.ndarray] = None
+        self._scene_flip: Optional[np.ndarray] = None
+        self._pbo: list = []
+        self._pbo_idx = 0
+        self._pbo_ready = False
+        self._want_u8_depth = False
+        self._reload_tick = 0
 
         # Temporal accumulation (history buffer).
         self._temporal_prog = None
@@ -221,6 +229,10 @@ class ShaderWorker(threading.Thread):
 
         self.shaders_dir.mkdir(parents=True, exist_ok=True)
 
+        _acc = {"n": 0, "wait": 0.0, "proc": 0.0}
+        _acc_t = time.perf_counter()
+        _prev_end = time.perf_counter()
+
         while not self.stop_event.is_set():
             self.depth_ready.wait(timeout=0.05)
             if self.stop_event.is_set():
@@ -236,11 +248,30 @@ class ShaderWorker(threading.Thread):
                 continue
             self._last_ts = ts
 
+            _t0 = time.perf_counter()
             try:
                 out_rgb = self._process(packet)
             except Exception as exc:
                 print(f"[Rolux] shader error: {exc}")
                 out_rgb = self._depth_to_bgr(packet.rgb)
+            _t1 = time.perf_counter()
+            _acc["n"] += 1
+            _acc["wait"] += (_t0 - _prev_end) * 1000.0
+            _acc["proc"] += (_t1 - _t0) * 1000.0
+            _prev_end = _t1
+            if _t1 - _acc_t >= 1.0 and _acc["n"] > 0:
+                n = _acc["n"]
+                res = getattr(self, "_pt_res", (0, 0))
+                print(
+                    f"[perf/shader] {n}/s @ {res[0]}x{res[1]} | wait={_acc['wait']/n:5.1f}ms "
+                    f"process={_acc['proc']/n:5.1f}ms | "
+                    f"reload={getattr(self,'_pt_reload',0.0):4.1f} "
+                    f"upload={getattr(self,'_pt_upload',0.0):4.1f} "
+                    f"gpu_issue={getattr(self,'_pt_issue',0.0):4.1f} "
+                    f"readback={getattr(self,'_pt_readback',0.0):5.1f}"
+                )
+                _acc = {"n": 0, "wait": 0.0, "proc": 0.0}
+                _acc_t = _t1
 
             with self.out_lock:
                 self.out_slot[0] = DepthPacket(
@@ -288,7 +319,7 @@ class ShaderWorker(threading.Thread):
 
         tw = max(64, int(packet.rect.width))
         th = max(64, int(packet.rect.height))
-        max_dim = max(256, int(getattr(self.cfg, "shader_max_dim", 1280)))
+        max_dim = max(256, int(self.shader_max_dim))
         scale = min(1.0, float(max_dim) / float(max(tw, th)))
         tw = max(64, int(tw * scale))
         th = max(64, int(th * scale))
@@ -300,7 +331,9 @@ class ShaderWorker(threading.Thread):
         if not self._gl_ok:
             return self._depth_to_bgr(depth)
 
+        _tr = time.perf_counter()
         self._reload_if_needed()
+        self._pt_reload = (time.perf_counter() - _tr) * 1000.0
         if not self._programs:
             self.status["shaders"] = []
             return self._depth_to_bgr(depth)
@@ -446,14 +479,15 @@ class ShaderWorker(threading.Thread):
         print(f"[Rolux] normal program loaded ({src_tag})")
 
     def _reload_if_needed(self) -> None:
-        # Hot-reload built-in normals + user *.glsl (reads disk each check).
-        self._load_normal_program(force=False)
-        files = self._shader_files()
-        sig = tuple((p.name, p.stat().st_mtime_ns) for p in files)
-        if sig == self._shader_sig:
-            return
-        self._shader_sig = sig
-        self._compile_all(files)
+        # Hot-reload built-in normals + user *.glsl (stat disk every ~15 frames).
+        self._reload_tick += 1
+        if self._reload_tick == 1 or self._reload_tick % 15 == 0:
+            self._load_normal_program(force=False)
+            files = self._shader_files()
+            sig = tuple((p.name, p.stat().st_mtime_ns) for p in files)
+            if sig != self._shader_sig:
+                self._shader_sig = sig
+                self._compile_all(files)
 
     def _compile_shader(self, src: str, stage: int) -> int:
         from OpenGL import GL
@@ -511,6 +545,7 @@ class ShaderWorker(threading.Thread):
             except Exception as exc:
                 print(f"[Rolux] shader compile failed ({path.name}): {exc}")
         self.status["shaders"] = names
+        self._want_u8_depth = "00_depth_view.glsl" in names
         if not names:
             print("[Rolux] no active shaders — showing raw depth")
 
@@ -532,14 +567,20 @@ class ShaderWorker(threading.Thread):
         for fbo in (self._fbo_a, self._fbo_b, self._fbo_n, self._fbo_hist[0], self._fbo_hist[1]):
             if fbo:
                 GL.glDeleteFramebuffers(1, [int(fbo)])
+        if self._pbo:
+            GL.glDeleteBuffers(len(self._pbo), self._pbo)
         self._tex_scene = self._tex_depth = self._tex_depth_f = None
         self._tex_normal = self._tex_a = self._tex_b = None
         self._fbo_a = self._fbo_b = self._fbo_n = None
         self._tex_hist = [None, None]
         self._fbo_hist = [None, None]
+        self._pbo = []
+        self._pbo_ready = False
         self._hist_valid = False
         self._w = self._h = 0
         self._df_w = self._df_h = 0
+        self._readback_flip = None
+        self._scene_flip = None
 
     def _make_tex(self) -> int:
         from OpenGL import GL
@@ -609,6 +650,18 @@ class ShaderWorker(threading.Thread):
 
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
         self._readback = np.empty((h, w, 3), dtype=np.uint8)
+        self._readback_flip = np.empty((h, w, 3), dtype=np.uint8)
+        self._scene_flip = np.empty((h, w, 3), dtype=np.uint8)
+        if self._pbo:
+            GL.glDeleteBuffers(len(self._pbo), self._pbo)
+        self._pbo = [int(x) for x in GL.glGenBuffers(2)]
+        pack_bytes = w * h * 3
+        for pbo in self._pbo:
+            GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, pbo)
+            GL.glBufferData(GL.GL_PIXEL_PACK_BUFFER, pack_bytes, None, GL.GL_STREAM_READ)
+        GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0)
+        self._pbo_idx = 0
+        self._pbo_ready = False
 
     def _upload(self, tex: int, rgb: np.ndarray) -> None:
         from OpenGL import GL
@@ -620,6 +673,27 @@ class ShaderWorker(threading.Thread):
         GL.glTexSubImage2D(
             GL.GL_TEXTURE_2D, 0, 0, 0, w, h, GL.GL_RGB, GL.GL_UNSIGNED_BYTE, rgb
         )
+
+    def _upload_raw(self, tex: int, img: np.ndarray, fmt) -> None:
+        """Upload an already-oriented (flipped) 3-channel buffer, no CPU copy."""
+        from OpenGL import GL
+
+        img = np.ascontiguousarray(img)
+        h, w = img.shape[:2]
+        GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, w, h, fmt, GL.GL_UNSIGNED_BYTE, img)
+
+    def _upload_gray(self, tex: int, gray_flipped: np.ndarray) -> None:
+        """Expand a single-channel (already flipped) depth to RGB and upload."""
+        import cv2
+        from OpenGL import GL
+
+        rgb = cv2.cvtColor(gray_flipped, cv2.COLOR_GRAY2RGB)
+        h, w = rgb.shape[:2]
+        GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, w, h, GL.GL_RGB, GL.GL_UNSIGNED_BYTE, rgb)
 
     def _ensure_depth_f(self, w: int, h: int) -> None:
         from OpenGL import GL
@@ -754,15 +828,18 @@ class ShaderWorker(threading.Thread):
         h, w = depth.shape[:2]
         self._ensure_targets(w, h)
 
-        scene_rgb = np.ascontiguousarray(scene_bgr[:, :, ::-1])
-        depth_rgb = np.ascontiguousarray(np.stack([depth, depth, depth], axis=-1))
+        _tu = time.perf_counter()
+        import cv2
 
-        self._upload(self._tex_scene, scene_rgb)
-        self._upload(self._tex_depth, depth_rgb)
-        self._upload(self._tex_a, scene_rgb)
-        # Float depth at native TRT res — normals sample this, not the 8-bit preview.
+        scene_bgr = np.ascontiguousarray(scene_bgr)
+        cv2.flip(scene_bgr, 0, dst=self._scene_flip)
+        self._upload_raw(self._tex_scene, self._scene_flip, GL.GL_BGR)
+        if self._want_u8_depth:
+            self._upload_raw(self._tex_depth, cv2.flip(depth, 0), GL.GL_RED)
         self._upload_depth_f(depth_f)
+        self._pt_upload = (time.perf_counter() - _tu) * 1000.0
 
+        _tg = time.perf_counter()
         self._generate_normals(self._df_w, self._df_h)
         if self._save_normals.is_set():
             self._save_normals.clear()
@@ -771,7 +848,7 @@ class ShaderWorker(threading.Thread):
             except Exception as exc:
                 print(f"[Rolux] save normals failed: {exc}")
 
-        src_tex = self._tex_a
+        src_tex = self._tex_scene
         dst_fbo = self._fbo_b
         t = float(time.perf_counter() - self._t0)
 
@@ -875,14 +952,56 @@ class ShaderWorker(threading.Thread):
             except Exception as exc:
                 print(f"[Rolux] save overlay failed: {exc}")
 
+        self._pt_issue = (time.perf_counter() - _tg) * 1000.0
+
+        _tb = time.perf_counter()
+        out = self._pbo_readback(read_fbo, w, h)
+        self._pt_readback = (time.perf_counter() - _tb) * 1000.0
+        self._pt_res = (w, h)
+        return out
+
+    def _pbo_readback(self, read_fbo: int, w: int, h: int) -> np.ndarray:
+        """Async pack-buffer readback; returns top-down BGR for the overlay."""
+        import ctypes
+
+        import cv2
+        from OpenGL import GL
+
+        assert self._readback is not None and self._readback_flip is not None
+        pack = w * h * 3
+        write_idx = self._pbo_idx
+        read_idx = 1 - write_idx
+
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, read_fbo)
-        GL.glReadPixels(0, 0, w, h, GL.GL_RGB, GL.GL_UNSIGNED_BYTE, self._readback)
+        GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, self._pbo[write_idx])
+        GL.glReadPixels(0, 0, w, h, GL.GL_BGR, GL.GL_UNSIGNED_BYTE, ctypes.c_void_p(0))
+        GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0)
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
 
-        return np.ascontiguousarray(np.flipud(self._readback)[:, :, ::-1])
+        if self._pbo_ready:
+            GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, self._pbo[read_idx])
+            ptr = GL.glMapBuffer(GL.GL_PIXEL_PACK_BUFFER, GL.GL_READ_ONLY)
+            if ptr:
+                src = (ctypes.c_ubyte * pack).from_address(int(ptr))
+                np.copyto(
+                    self._readback,
+                    np.frombuffer(src, dtype=np.uint8).reshape(h, w, 3),
+                )
+                GL.glUnmapBuffer(GL.GL_PIXEL_PACK_BUFFER)
+            GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0)
+        else:
+            # First frame: no prior PBO — sync read once, then pipeline async.
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, read_fbo)
+            GL.glReadPixels(0, 0, w, h, GL.GL_BGR, GL.GL_UNSIGNED_BYTE, self._readback)
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+            self._pbo_ready = True
+
+        self._pbo_idx = read_idx
+        cv2.flip(self._readback, 0, dst=self._readback_flip)
+        return self._readback_flip
 
     def _upload_to_tex(self, tex: int, depth_f: np.ndarray) -> None:
-        """Upload an R32F depth map into an existing texture (flipped for GL)."""
+        """Upload an R32F depth map into an existing texture (GL bottom-left origin)."""
         from OpenGL import GL
 
         d = np.ascontiguousarray(np.flipud(depth_f.astype(np.float32, copy=False)))

@@ -291,7 +291,9 @@ class InferenceWorker(threading.Thread):
                 self._stream,
             )
         )
+        _t_sync = time.perf_counter()
         _cuda_check(cudart.cudaStreamSynchronize(self._stream))
+        self._sync_ms = (time.perf_counter() - _t_sync) * 1000.0
 
         depth = np.asarray(self._h_output)
         while depth.ndim > 2:
@@ -330,6 +332,12 @@ class InferenceWorker(threading.Thread):
             pass
 
         self._last_ts: Optional[float] = None
+        self._sync_ms = 0.0
+
+        # Rolling per-stage timing (printed once/sec) to locate pipeline stalls.
+        _acc = {"n": 0, "wait": 0.0, "pre": 0.0, "sync": 0.0, "post": 0.0, "total": 0.0, "skip": 0}
+        _acc_t = time.perf_counter()
+        _prev_end = time.perf_counter()
 
         while not self.stop_event.is_set():
             with self.in_lock:
@@ -350,12 +358,14 @@ class InferenceWorker(threading.Thread):
             t0 = time.perf_counter()
             try:
                 self._preprocess(packet.bgr)
+                t_pre = time.perf_counter()
 
                 # If a newer frame arrived during preprocess, skip this TRT call.
                 with self.in_lock:
                     newest = self.in_slot[0]
                 if newest is not None and newest.capture_ts > ts:
                     self._last_ts = None  # allow immediate retry on newest
+                    _acc["skip"] += 1
                     continue
 
                 ok = self._context.execute_async_v3(self._stream_ptr)
@@ -363,7 +373,26 @@ class InferenceWorker(threading.Thread):
                     print("[Rolux] execute_async_v3 returned False")
                     continue
                 rgb, depth_f = self._colormap_depth(rect.height, rect.width)
-                infer_ms = (time.perf_counter() - t0) * 1000.0
+                t_end = time.perf_counter()
+                infer_ms = (t_end - t0) * 1000.0
+
+                _acc["n"] += 1
+                _acc["wait"] += (t0 - _prev_end) * 1000.0        # idle between iterations
+                _acc["pre"] += (t_pre - t0) * 1000.0             # cpu preprocess + H2D enqueue
+                _acc["sync"] += self._sync_ms                    # gpu execute + D2H (wall)
+                _acc["post"] += (t_end - t_pre) * 1000.0 - self._sync_ms  # cpu colormap
+                _acc["total"] += infer_ms
+                _prev_end = t_end
+                if t_end - _acc_t >= 1.0 and _acc["n"] > 0:
+                    n = _acc["n"]
+                    print(
+                        f"[perf/infer] {n}/s | total={_acc['total']/n:5.1f}ms "
+                        f"wait={_acc['wait']/n:5.1f} pre={_acc['pre']/n:4.1f} "
+                        f"gpu_sync={_acc['sync']/n:4.1f} post={_acc['post']/n:4.1f} "
+                        f"| stale_skips={_acc['skip']}"
+                    )
+                    _acc = {"n": 0, "wait": 0.0, "pre": 0.0, "sync": 0.0, "post": 0.0, "total": 0.0, "skip": 0}
+                    _acc_t = t_end
 
                 # Drop stale results — never publish depth older than the latest capture.
                 with self.in_lock:

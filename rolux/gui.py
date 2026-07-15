@@ -293,6 +293,7 @@ class RoluxApp:
         self.var_focus = tk.BooleanVar(value=True)
         self.var_allow_shot = tk.BooleanVar(value=False)
         self.var_temporal = tk.BooleanVar(value=True)
+        self.var_render = tk.IntVar(value=960)
         self.var_engine = tk.StringVar(value=str(Path("models/depth_anything_v2_vits_fp16.engine")))
 
         self._labeled_entry(s, "Window title contains", self.var_title)
@@ -310,6 +311,10 @@ class RoluxApp:
             ).pack(side="left", padx=(0, 12))
 
         self._labeled_scale(s, "Target FPS", self.var_fps, 30, 144, is_int=True)
+        self._labeled_scale(
+            s, "Shader render scale", self.var_render, 640, 1280, is_int=True,
+            command=self._on_render_scale_change,
+        )
         self._labeled_scale(s, "Overlay opacity", self.var_opacity, 0.2, 1.0, is_int=False)
 
         tk.Checkbutton(
@@ -376,7 +381,7 @@ class RoluxApp:
             relief="flat", font=FONT,
         ).pack(fill="x", pady=(2, 8), ipady=5)
 
-    def _labeled_scale(self, parent, label, var, frm, to, is_int) -> None:
+    def _labeled_scale(self, parent, label, var, frm, to, is_int, command=None) -> None:
         row = ttk.Frame(parent, style="Card.TFrame")
         row.pack(fill="x", pady=4)
         top = ttk.Frame(row, style="Card.TFrame")
@@ -388,6 +393,8 @@ class RoluxApp:
         def _update(_=None) -> None:
             v = var.get()
             val_lbl.configure(text=f"{int(v)}" if is_int else f"{float(v):.2f}")
+            if command is not None:
+                command()
 
         ttk.Scale(row, from_=frm, to=to, variable=var, command=lambda _: _update()).pack(
             fill="x", pady=(2, 0)
@@ -666,6 +673,10 @@ class RoluxApp:
         if self.infer is not None:
             self.infer.stabilize = on
 
+    def _on_render_scale_change(self) -> None:
+        if self.shaders is not None:
+            self.shaders.shader_max_dim = max(256, int(self.var_render.get()))
+
     def _save_normals(self) -> None:
         if self.shaders is None:
             messagebox.showinfo("RoLux", "Start the overlay first.")
@@ -731,6 +742,7 @@ class RoluxApp:
             engine_path=engine,
             overlay_opacity=float(self.var_opacity.get()),
             shaders_dir=self.shaders_dir,
+            shader_max_dim=max(256, int(self.var_render.get())),
             temporal_accumulation=bool(self.var_temporal.get()),
             depth_temporal_filter=bool(self.var_temporal.get()),
             stabilize_depth_range=bool(self.var_temporal.get()),
