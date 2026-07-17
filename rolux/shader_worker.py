@@ -180,6 +180,8 @@ class ShaderWorker(threading.Thread):
         self._vao = None
         self._w = 0
         self._h = 0
+        self._rb_w = 0
+        self._rb_h = 0
         self._df_w = 0
         self._df_h = 0
         self._readback = None
@@ -206,6 +208,7 @@ class ShaderWorker(threading.Thread):
         self._save_normals = threading.Event()
         self._save_overlay = threading.Event()
         self._captures_dir = Path("captures")
+        # Uploaded as uStrength: 1 = raw tilt, <1 flattens toward camera, >1 exaggerates.
         self._normal_strength = 1.0
         self._normals_path = self.shaders_dir / "_normals.frag"
         self._normals_mtime: int = -1
@@ -346,7 +349,15 @@ class ShaderWorker(threading.Thread):
 
         depth_f = self._temporal_filter_depth(depth_f)
         if depth_f.shape[0] != th or depth_f.shape[1] != tw:
-            depth_f = cv2.resize(depth_f, (tw, th), interpolation=cv2.INTER_LINEAR)
+            # AREA when shrinking (less aliasing); LINEAR when upscaling from
+            # network res — the normals shader bilateral + multi-tap handle the rest.
+            oh, ow = int(depth_f.shape[0]), int(depth_f.shape[1])
+            interp = (
+                cv2.INTER_AREA
+                if (th * tw) < (oh * ow)
+                else cv2.INTER_LINEAR
+            )
+            depth_f = cv2.resize(depth_f, (tw, th), interpolation=interp)
             depth_f = np.ascontiguousarray(depth_f, dtype=np.float32)
 
         return self._run_chain(scene, depth, depth_f)
@@ -581,7 +592,9 @@ class ShaderWorker(threading.Thread):
         self._pbo_ready = False
         self._hist_valid = False
         self._w = self._h = 0
+        self._rb_w = self._rb_h = 0
         self._df_w = self._df_h = 0
+        self._readback = None
         self._readback_flip = None
         self._scene_flip = None
 
@@ -652,19 +665,8 @@ class ShaderWorker(threading.Thread):
         self._hist_valid = False  # first frame after a resize has no valid history
 
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
-        self._readback = np.empty((h, w, 3), dtype=np.uint8)
-        self._readback_flip = np.empty((h, w, 3), dtype=np.uint8)
         self._scene_flip = np.empty((h, w, 3), dtype=np.uint8)
-        if self._pbo:
-            GL.glDeleteBuffers(len(self._pbo), self._pbo)
-        self._pbo = [int(x) for x in GL.glGenBuffers(2)]
-        pack_bytes = w * h * 3
-        for pbo in self._pbo:
-            GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, pbo)
-            GL.glBufferData(GL.GL_PIXEL_PACK_BUFFER, pack_bytes, None, GL.GL_STREAM_READ)
-        GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0)
-        self._pbo_idx = 0
-        self._pbo_ready = False
+        self._ensure_readback(w, h)
 
         # View-space normals at shader resolution (uDepthF sampled with linear upscale).
         self._tex_normal = self._make_tex()
@@ -680,6 +682,26 @@ class ShaderWorker(threading.Thread):
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
         self._readback_n = np.empty((h, w, 3), dtype=np.uint8)
         print(f"[Rolux] normal target @ {w}x{h} (shader res)")
+
+    def _ensure_readback(self, w: int, h: int) -> None:
+        """Size PBO + CPU readback buffers for the frame that will be presented."""
+        from OpenGL import GL
+
+        if w == self._rb_w and h == self._rb_h and self._pbo and self._readback is not None:
+            return
+        if self._pbo:
+            GL.glDeleteBuffers(len(self._pbo), self._pbo)
+        self._pbo = [int(x) for x in GL.glGenBuffers(2)]
+        pack_bytes = w * h * 3
+        for pbo in self._pbo:
+            GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, pbo)
+            GL.glBufferData(GL.GL_PIXEL_PACK_BUFFER, pack_bytes, None, GL.GL_STREAM_READ)
+        GL.glBindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0)
+        self._pbo_idx = 0
+        self._pbo_ready = False
+        self._readback = np.empty((h, w, 3), dtype=np.uint8)
+        self._readback_flip = np.empty((h, w, 3), dtype=np.uint8)
+        self._rb_w, self._rb_h = w, h
 
     def _upload(self, tex: int, rgb: np.ndarray) -> None:
         from OpenGL import GL
@@ -949,6 +971,7 @@ class ShaderWorker(threading.Thread):
         if self._save_overlay.is_set():
             self._save_overlay.clear()
             try:
+                self._ensure_readback(w, h)
                 self._save_fbo_png(read_fbo, w, h, "overlay")
             except Exception as exc:
                 print(f"[Rolux] save overlay failed: {exc}")
@@ -968,6 +991,7 @@ class ShaderWorker(threading.Thread):
         import cv2
         from OpenGL import GL
 
+        self._ensure_readback(w, h)
         assert self._readback is not None and self._readback_flip is not None
         pack = w * h * 3
         write_idx = self._pbo_idx

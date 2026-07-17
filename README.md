@@ -17,7 +17,7 @@ overlay on top, RoLux never touches the Roblox process.
 ## How it works
 
 ```
-DXGI desktop capture ──▶ crop to Roblox client rect
+capture (DXGI if large / PrintWindow if small) ──▶ client BGR
         │                       │
         │ (full-res color)      │ (392px downscale)
         ▼                       ▼
@@ -84,6 +84,8 @@ Unfocus Roblox to hide it.
 - **ReShade-style GUI** — tabbed, dark, with an effect toggle list and live
   sliders that edit each shader's `#define` values on disk.
 - **Presets** — save/load the whole chain (enabled effects + all values) as JSON.
+- **Persistent settings** — GUI knobs (render scale, FPS, opacity, engine path,
+  last preset, etc.) restore from `settings.json` on launch.
 - **Temporal accumulation** — a history buffer denoises SSR/GI via depth-rejected
   accumulation with neighborhood color clamping (toggleable).
 - **Session sandbox** — edits go to a throwaway `shaders/temp` copy; the pristine
@@ -104,7 +106,7 @@ main.py               entry point
 export_trt.py         ONNX → TensorRT engine builder
 rolux/
   config.py           tuning knobs
-  capture_worker.py   DXGI desktop capture + crop
+  capture_worker.py   DXGI (large/FS) + PrintWindow (small/windowed)
   inference_worker.py TensorRT depth inference
   shader_worker.py    GLSL chain + normals + temporal resolve
   overlay_ui.py       layered click-through overlay window

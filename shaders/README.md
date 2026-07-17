@@ -17,7 +17,7 @@ Built-in uniforms (all optional to declare — missing ones are skipped):
   vec2      uResolution — buffer size in pixels
 
 Decode normals in GLSL with:
-  vec3 n = texture(uNormal, vUV).xyz * 2.0 - 1.0;
+    vec3 n = texture(uNormal, vUV).xyz * 2.0 - 1.0;
 
 Required varyings / output when writing a full shader:
   in  vec2 vUV;

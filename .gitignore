@@ -21,6 +21,8 @@ env/
 shaders/temp/
 # Screenshot output.
 captures/
+# Local GUI / pipeline settings (machine-specific).
+settings.json
 
 # ---- Models (large + machine-specific) ----
 # TensorRT .engine files are GPU/driver specific and must be rebuilt locally.

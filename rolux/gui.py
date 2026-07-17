@@ -10,13 +10,13 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk, simpledialog
 from typing import Optional
 
+from rolux import app_settings, presets
 from rolux.capture_worker import CaptureWorker
 from rolux.config import RoluxConfig
 from rolux.inference_worker import InferenceWorker
 from rolux.overlay_ui import DepthOverlay
-from rolux.shader_worker import ShaderWorker
-from rolux import presets
 from rolux.presets import ShaderParam, format_value, parse_params
+from rolux.shader_worker import ShaderWorker
 
 
 # --- ReShade-ish palette ---
@@ -79,10 +79,17 @@ class RoluxApp:
         self._tab_canvases: list = []
         self._active_canvas = None
 
+        self._settings_save_after: Optional[str] = None
+        self._settings_ready = False
+
         self._build_style()
         self._build_ui()
+        self._load_app_settings()
         self._refresh_shader_list()
-        self._refresh_presets()
+        self._refresh_presets(select=self.var_preset.get() or None)
+        self._maybe_autoload_preset()
+        self._bind_settings_autosave()
+        self._settings_ready = True
         self._pulse_status()
 
     # ---------------------------------------------------------------- style
@@ -312,9 +319,17 @@ class RoluxApp:
 
         self._labeled_scale(s, "Target FPS", self.var_fps, 30, 144, is_int=True)
         self._labeled_scale(
-            s, "Shader render scale", self.var_render, 640, 1280, is_int=True,
-            command=self._on_render_scale_change,
+            s, "Shader render scale", self.var_render, 640, 1920, is_int=True,
+            command=self._on_render_scale_change, step=10,
         )
+        tk.Label(
+            s,
+            text=(
+                "Internal effect resolution (max edge). Fullscreen looks soft if this "
+                "is much smaller than your monitor — try 1440–1920. Higher = sharper, heavier."
+            ),
+            bg=PANEL, fg=MUTED, font=FONT_SM, justify="left", wraplength=420,
+        ).pack(fill="x", pady=(0, 4))
         self._labeled_scale(s, "Overlay opacity", self.var_opacity, 0.2, 1.0, is_int=False)
 
         tk.Checkbutton(
@@ -395,7 +410,9 @@ class RoluxApp:
             relief="flat", font=FONT,
         ).pack(fill="x", pady=(2, 8), ipady=5)
 
-    def _labeled_scale(self, parent, label, var, frm, to, is_int, command=None) -> None:
+    def _labeled_scale(
+        self, parent, label, var, frm, to, is_int, command=None, step=None
+    ) -> None:
         row = ttk.Frame(parent, style="Card.TFrame")
         row.pack(fill="x", pady=4)
         top = ttk.Frame(row, style="Card.TFrame")
@@ -405,7 +422,15 @@ class RoluxApp:
         val_lbl.pack(side="right")
 
         def _update(_=None) -> None:
-            v = var.get()
+            v = float(var.get())
+            if step is not None and float(step) > 0:
+                snapped = round(v / float(step)) * float(step)
+                snapped = max(float(frm), min(float(to), snapped))
+                if is_int:
+                    snapped = int(round(snapped))
+                if abs(float(var.get()) - float(snapped)) > 1e-9:
+                    var.set(snapped)
+                    v = float(snapped)
             val_lbl.configure(text=f"{int(v)}" if is_int else f"{float(v):.2f}")
             if command is not None:
                 command()
@@ -682,10 +707,10 @@ class RoluxApp:
             self.overlay.set_exclude_from_capture(not allow)
         self._update_recording_label()
         if allow:
-            msg = "Recording ON — visible to capture apps; RoLux uses PrintWindow"
+            msg = "Recording ON — effects visible to capture apps"
             color = OK
         else:
-            msg = "Recording OFF — overlay hidden; RoLux uses DXGI"
+            msg = "Recording OFF — overlay hidden from capture apps"
             color = MUTED
         if self.running:
             self.lbl_state.configure(text=msg, fg=color)
@@ -698,11 +723,11 @@ class RoluxApp:
             return
         if bool(self.var_allow_shot.get()):
             lbl.configure(
-                text="Recording: effects visible externally · RoLux capture: PrintWindow"
+                text="Recording: effects visible externally · capture: PrintWindow"
             )
         else:
             lbl.configure(
-                text="Recording: overlay hidden from capture · RoLux capture: DXGI (default)"
+                text="Recording: overlay hidden · capture: DXGI large / PrintWindow small"
             )
 
     def _on_temporal_change(self) -> None:
@@ -715,8 +740,11 @@ class RoluxApp:
             self.infer.stabilize = on
 
     def _on_render_scale_change(self) -> None:
+        dim = max(256, int(self.var_render.get()))
         if self.shaders is not None:
-            self.shaders.shader_max_dim = max(256, int(self.var_render.get()))
+            self.shaders.shader_max_dim = dim
+        if self.capture is not None:
+            self.capture.shader_max_dim = dim
 
     def _save_normals(self) -> None:
         if self.shaders is None:
@@ -922,7 +950,110 @@ class RoluxApp:
         self.lbl_cap.configure(text="Capture: — FPS")
         self.lbl_shaders.configure(text="Active: —")
 
+    # -------------------------------------------------------- app settings
+    def _collect_app_settings(self) -> dict:
+        geo = ""
+        try:
+            geo = self.root.geometry()
+        except Exception:
+            pass
+        return {
+            "window_title": self.var_title.get().strip() or "Roblox",
+            "network_size": int(self.var_size.get()),
+            "target_fps": int(self.var_fps.get()),
+            "shader_max_dim": int(self.var_render.get()),
+            "overlay_opacity": float(self.var_opacity.get()),
+            "require_focus": bool(self.var_focus.get()),
+            "allow_screen_capture": bool(self.var_allow_shot.get()),
+            "temporal": bool(self.var_temporal.get()),
+            "engine_path": self.var_engine.get().strip(),
+            "last_preset": self.var_preset.get().strip(),
+            "geometry": geo or "500x780",
+        }
+
+    def _load_app_settings(self) -> None:
+        data = app_settings.load_settings()
+        try:
+            self.var_title.set(str(data.get("window_title", "Roblox")))
+            size = int(data.get("network_size", 392))
+            self.var_size.set(518 if size >= 500 else 392)
+            self.var_fps.set(int(data.get("target_fps", 144)))
+            render = int(data.get("shader_max_dim", 960))
+            render = max(640, min(1920, int(round(render / 10.0) * 10)))
+            self.var_render.set(render)
+            self.var_opacity.set(float(data.get("overlay_opacity", 1.0)))
+            self.var_focus.set(bool(data.get("require_focus", True)))
+            self.var_allow_shot.set(bool(data.get("allow_screen_capture", False)))
+            self.var_temporal.set(bool(data.get("temporal", True)))
+            eng = str(data.get("engine_path", "")).strip()
+            if eng:
+                self.var_engine.set(eng)
+            preset = str(data.get("last_preset", "")).strip()
+            if preset:
+                self.var_preset.set(preset)
+            geo = str(data.get("geometry", "")).strip()
+            if geo:
+                try:
+                    self.root.geometry(geo)
+                except Exception:
+                    pass
+            self._update_recording_label()
+        except Exception as exc:
+            print(f"[Rolux] apply settings failed: {exc}")
+
+    def _save_app_settings(self) -> None:
+        if not getattr(self, "_settings_ready", False):
+            return
+        app_settings.save_settings(self._collect_app_settings())
+
+    def _schedule_save_settings(self, *_args) -> None:
+        if not getattr(self, "_settings_ready", False):
+            return
+        if self._settings_save_after is not None:
+            try:
+                self.root.after_cancel(self._settings_save_after)
+            except Exception:
+                pass
+        self._settings_save_after = self.root.after(400, self._flush_save_settings)
+
+    def _flush_save_settings(self) -> None:
+        self._settings_save_after = None
+        self._save_app_settings()
+
+    def _bind_settings_autosave(self) -> None:
+        for var in (
+            self.var_title,
+            self.var_size,
+            self.var_fps,
+            self.var_render,
+            self.var_opacity,
+            self.var_focus,
+            self.var_allow_shot,
+            self.var_temporal,
+            self.var_engine,
+            self.var_preset,
+        ):
+            var.trace_add("write", self._schedule_save_settings)
+
+    def _maybe_autoload_preset(self) -> None:
+        name = self.var_preset.get().strip()
+        if not name:
+            return
+        path = self.presets_dir / f"{name}{presets.PRESET_EXT}"
+        if not path.is_file():
+            return
+        try:
+            presets.apply_preset(self.shaders_dir, presets.load_preset(path))
+            self._refresh_shader_list()
+            if self._sel_path is not None:
+                self._select_shader(self._sel_path)
+            print(f"[Rolux] restored preset '{name}'")
+        except Exception as exc:
+            print(f"[Rolux] preset restore failed: {exc}")
+
     def _on_close(self) -> None:
+        self._settings_ready = True
+        self._save_app_settings()
         self.stop()
         self._cleanup_temp_shaders()
         self.root.destroy()
