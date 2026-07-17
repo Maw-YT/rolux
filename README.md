@@ -48,23 +48,54 @@ pip install -r requirements.txt
 
 ## Model setup
 
-The depth model is **not** committed (TensorRT engines are GPU/driver specific
-and the ONNX weights are large). Build the engine locally:
+Depth engines are **not** committed (GPU/driver specific). Build one locally
+with NVIDIA’s `trtexec`, then point the GUI at the `.engine`.
 
-1. Grab a Depth Anything V2 ONNX (e.g. the ViT-S export from
-   [fabio-sim/Depth-Anything-ONNX](https://github.com/fabio-sim/Depth-Anything-ONNX))
-   and place it in `models/`.
-2. Build a TensorRT engine:
+### Get `trtexec`
 
-   ```bash
-   # FP16 ONNX:
-   python export_trt.py --onnx models/depth_anything_v2_vits_fp16.onnx --height 392 --width 392
-   # or auto-cast an FP32 ONNX to mixed FP16 (TRT 11):
-   python export_trt.py --onnx models/depth_anything_v2_vits.onnx --autocast --height 392 --width 392
+1. Join the free [NVIDIA Developer Program](https://developer.nvidia.com/tensorrt)
+   and open the TensorRT download page.
+2. Download the **TensorRT zip** for your CUDA version (Windows x64) — pick a
+   release that matches the TensorRT you run RoLux with (10.x or 11.x).
+3. Unzip it somewhere permanent (e.g. `C:\TensorRT`).
+4. Add the `bin` folder to your `PATH` (that directory contains `trtexec.exe`).
+
+   Example (PowerShell, current session only):
+
+   ```powershell
+   $env:Path = "C:\TensorRT\bin;" + $env:Path
+   trtexec --help
    ```
 
-3. The default engine path is `models/depth_anything_v2_vits_fp16.engine`
-   (changeable in the GUI).
+Docs: [Installing TensorRT (zip / Windows)](https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/install-zip.html).
+
+### Build an engine
+
+1. Put a Depth Anything V2 ONNX in `models/` (e.g. ViT-S from
+   [fabio-sim/Depth-Anything-ONNX](https://github.com/fabio-sim/Depth-Anything-ONNX)).
+2. Run `trtexec` (H/W should be divisible by 14; use your ONNX’s input name —
+   often `image` or `pixel_values`):
+
+   ```bash
+   # TensorRT 10.x (weak typing — --fp16 is available):
+   trtexec --onnx=models/depth_anything_v2_vits_fp16.onnx ^
+     --saveEngine=models/depth_anything_v2_vits_fp16.engine ^
+     --fp16 ^
+     --minShapes=image:1x3x392x392 ^
+     --optShapes=image:1x3x392x392 ^
+     --maxShapes=image:1x3x392x392
+
+   # TensorRT 11.x (strongly typed — precision comes from the ONNX; no --fp16):
+   trtexec --onnx=models/depth_anything_v2_vits_fp16.onnx ^
+     --saveEngine=models/depth_anything_v2_vits_fp16.engine ^
+     --minShapes=image:1x3x392x392 ^
+     --optShapes=image:1x3x392x392 ^
+     --maxShapes=image:1x3x392x392
+   ```
+
+3. In the GUI, select your `.engine` (default path is
+   `models/depth_anything_v2_vits_fp16.engine`).
+
 
 ## Run
 
@@ -162,8 +193,7 @@ uniforms, chain order, and tuning.
 
 ```
 main.py               entry point
-export_trt.py         ONNX → TensorRT engine builder
-rolux.spec            PyInstaller onedir build (→ dist/RoLux/RoLux.exe)
+rolux.spec            PyInstaller onedir build (-> dist/RoLux/RoLux.exe)
 rthook_cuda.py        PyInstaller runtime hook for TensorRT/CUDA DLLs
 rolux/
   config.py           tuning knobs
@@ -175,9 +205,9 @@ rolux/
   gui.py              control panel
   presets.py          preset save/load + #define parsing
   win32_utils.py      window/geometry/capture helpers
-  normals.py          CPU depth→normals fallback
+  normals.py          CPU depth->normals fallback
 shaders/              hot-reloaded *.glsl effects (+ presets in presets/)
-models/               build your TensorRT engine here (gitignored weights)
+models/               your TensorRT .engine (gitignored; build with trtexec)
 presets/              saved effect-chain presets (JSON)
 ```
 

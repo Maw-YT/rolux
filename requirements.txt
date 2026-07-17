@@ -10,11 +10,6 @@ opencv-python-headless>=4.9.0
 Pillow>=10.0.0
 pywin32>=306
 dxcam>=0.0.5
-nvidia-modelopt[onnx]>=0.45.0
-
-# ONNX → engine builder (export_trt.py)
-onnx>=1.16.0
-onnxconverter-common>=1.14.0
 
 # GLSL post chain (shaders/*.glsl)
 PyOpenGL>=3.1.7

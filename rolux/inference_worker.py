@@ -235,7 +235,9 @@ class InferenceWorker(threading.Thread):
         if not path.is_file():
             raise FileNotFoundError(
                 f"Missing TensorRT engine: {path}\n"
-                "Build it with: python export_trt.py --onnx path/to/model.onnx"
+                "Build it with trtexec (see README Model setup), e.g.\n"
+                "  trtexec --onnx=models/your_model.onnx "
+                "--saveEngine=models/your_model.engine ..."
             )
         self._load_engine(path)
         self._alloc_cuda()
