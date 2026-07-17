@@ -66,21 +66,24 @@ with NVIDIA’s `trtexec`, then point the GUI at the `.engine`.
 
 ### Build an engine
 
-1. Put a Depth Anything V2 ONNX in `models/` (e.g. ViT-S from
-   [fabio-sim/Depth-Anything-ONNX](https://github.com/fabio-sim/Depth-Anything-ONNX)).
-2. Build with `trtexec`:
+1. Open
+   [onnx-community/depth-anything-v2-small](https://huggingface.co/onnx-community/depth-anything-v2-small)
+   on Hugging Face.
+2. Go to **Files and versions** → open the `onnx` folder → download any of the
+   `.onnx` files.
+3. Put it in `models/`.
+4. Build with `trtexec` (replace the ONNX/engine names with what you downloaded):
 
    ```bash
-   trtexec --onnx=models/depth_anything_v2_vits_fp16.onnx ^
-     --saveEngine=models/depth_anything_v2_vits_fp16.engine ^
+   trtexec --onnx=models/model_fp16.onnx ^
+     --saveEngine=models/model_fp16.engine ^
      --fp16 ^
-     --minShapes=image:1x3x392x392 ^
-     --optShapes=image:1x3x392x392 ^
-     --maxShapes=image:1x3x392x392
+     --minShapes=pixel_values:1x3x392x392 ^
+     --optShapes=pixel_values:1x3x392x392 ^
+     --maxShapes=pixel_values:1x3x392x392
    ```
 
-3. In the GUI, select your `.engine` (default path is
-   `models/depth_anything_v2_vits_fp16.engine`).
+5. In the GUI, select your `.engine`.
 
 
 ## Run
