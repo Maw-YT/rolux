@@ -55,39 +55,25 @@ with NVIDIA’s `trtexec`, then point the GUI at the `.engine`.
 
 1. Join the free [NVIDIA Developer Program](https://developer.nvidia.com/tensorrt)
    and open the TensorRT download page.
-2. Download the **TensorRT zip** for your CUDA version (Windows x64) — pick a
-   release that matches the TensorRT you run RoLux with (10.x or 11.x).
+2. Download the **TensorRT zip** for your CUDA version (Windows x64).
 3. Unzip it somewhere permanent (e.g. `C:\TensorRT`).
 4. Add the `bin` folder to your `PATH` (that directory contains `trtexec.exe`).
-
-   Example (PowerShell, current session only):
 
    ```powershell
    $env:Path = "C:\TensorRT\bin;" + $env:Path
    trtexec --help
    ```
 
-Docs: [Installing TensorRT (zip / Windows)](https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/install-zip.html).
-
 ### Build an engine
 
 1. Put a Depth Anything V2 ONNX in `models/` (e.g. ViT-S from
    [fabio-sim/Depth-Anything-ONNX](https://github.com/fabio-sim/Depth-Anything-ONNX)).
-2. Run `trtexec` (H/W should be divisible by 14; use your ONNX’s input name —
-   often `image` or `pixel_values`):
+2. Build with `trtexec`:
 
    ```bash
-   # TensorRT 10.x (weak typing — --fp16 is available):
    trtexec --onnx=models/depth_anything_v2_vits_fp16.onnx ^
      --saveEngine=models/depth_anything_v2_vits_fp16.engine ^
      --fp16 ^
-     --minShapes=image:1x3x392x392 ^
-     --optShapes=image:1x3x392x392 ^
-     --maxShapes=image:1x3x392x392
-
-   # TensorRT 11.x (strongly typed — precision comes from the ONNX; no --fp16):
-   trtexec --onnx=models/depth_anything_v2_vits_fp16.onnx ^
-     --saveEngine=models/depth_anything_v2_vits_fp16.engine ^
      --minShapes=image:1x3x392x392 ^
      --optShapes=image:1x3x392x392 ^
      --maxShapes=image:1x3x392x392
