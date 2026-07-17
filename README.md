@@ -76,6 +76,65 @@ Then in the control panel: pick your engine, **Start**, and click into Roblox.
 The overlay covers the client area and follows it as you move/resize the window.
 Unfocus Roblox to hide it.
 
+## Build the .exe (PyInstaller)
+
+RoLux ships a no-console onedir build via [`rolux.spec`](rolux.spec). The frozen
+app starts windowless and, on first launch, copies the bundled `shaders/` folder
+next to the executable so you can edit effects beside the `.exe`.
+
+1. Install dependencies (including PyInstaller) in your venv:
+
+   ```bash
+   pip install -r requirements.txt
+   pip install pyinstaller
+   ```
+
+2. Build from the repo root:
+
+   ```bash
+   python -m PyInstaller rolux.spec --noconfirm
+   ```
+
+3. Output:
+
+   ```
+   dist/RoLux/RoLux.exe
+   dist/RoLux/_internal/   # runtime DLLs / Python libs
+   ```
+
+4. Next to `RoLux.exe`, place the runtime folders the app expects:
+
+   ```
+   dist/RoLux/
+     RoLux.exe
+     models/          # your .engine (e.g. depth_anything_v2_vits_fp16.engine)
+     presets/         # optional — copy from the repo presets/
+     settings.json    # optional — your saved GUI settings
+     shaders/         # auto-created on first launch if missing
+   ```
+
+   Example (PowerShell):
+
+   ```powershell
+   Copy-Item -Recurse models\*.engine dist\RoLux\models\ -ErrorAction SilentlyContinue
+   New-Item -ItemType Directory -Force dist\RoLux\models, dist\RoLux\presets | Out-Null
+   Copy-Item presets\* dist\RoLux\presets\ -ErrorAction SilentlyContinue
+   Copy-Item settings.json dist\RoLux\ -ErrorAction SilentlyContinue
+   ```
+
+5. Run `dist\RoLux\RoLux.exe` from that folder (working directory must be the
+   `dist\RoLux` directory so relative `models/` / `presets/` / `settings.json`
+   paths resolve).
+
+Notes:
+
+- Rebuild after pulling shader or Python changes: the same `python -m PyInstaller
+  rolux.spec --noconfirm` command overwrites `dist/RoLux/`.
+- TensorRT **builder** blobs are intentionally not bundled (large / unused at
+  runtime). You still need a local NVIDIA driver + CUDA-compatible GPU to run
+  engines.
+- `build/` and `dist/` are gitignored; do not commit them.
+
 ## Features
 
 - **Depth + normals** from Depth Anything V2 (TensorRT FP16), full-res color kept
@@ -104,8 +163,11 @@ uniforms, chain order, and tuning.
 ```
 main.py               entry point
 export_trt.py         ONNX → TensorRT engine builder
+rolux.spec            PyInstaller onedir build (→ dist/RoLux/RoLux.exe)
+rthook_cuda.py        PyInstaller runtime hook for TensorRT/CUDA DLLs
 rolux/
   config.py           tuning knobs
+  app_settings.py     persistent GUI settings (settings.json)
   capture_worker.py   DXGI (large/FS) + PrintWindow (small/windowed)
   inference_worker.py TensorRT depth inference
   shader_worker.py    GLSL chain + normals + temporal resolve
@@ -116,6 +178,7 @@ rolux/
   normals.py          CPU depth→normals fallback
 shaders/              hot-reloaded *.glsl effects (+ presets in presets/)
 models/               build your TensorRT engine here (gitignored weights)
+presets/              saved effect-chain presets (JSON)
 ```
 
 ## Notes / limitations
